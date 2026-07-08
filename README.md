@@ -5,10 +5,10 @@ bytes written to a ConPTY's stdin are silently dropped mid-stream.
 
 ## Background
 
-[Warp](https://www.warp.dev) bootstraps WSL sessions by writing an ~80 KB
-shell script to the ConPTY's stdin pipe. On WSL 2.7.10 this works correctly.
-On WSL 2.9.x pre-release, ~24% of the bytes are silently dropped, causing
-WSL sessions to never finish bootstrapping.
+[Warp](https://www.warp.dev) delivers its shell integration code to WSL sessions
+by writing an ~80 KB script to the ConPTY's stdin pipe. On WSL 2.7.10 this
+works correctly. On WSL 2.9.x pre-release, ~24% of the bytes are silently
+dropped, causing WSL shell integration to never complete.
 
 The drop is **not at the tail** of the write. It occurs in a burst window
 partway through the stream (e.g. bytes 11,746–12,264 of a 17,500-byte write),
