@@ -8,16 +8,25 @@ bytes written to a ConPTY's stdin pipe are silently dropped mid-stream.
 **Requirements:**
 - Windows 10/11 with WSL 2 and a Linux distro installed
 - Rust toolchain (`cargo`)
-- `conpty.dll` — copy it from a [Windows Terminal](https://github.com/microsoft/terminal)
-  installation (e.g. `%LOCALAPPDATA%\Microsoft\WindowsApps\conpty.dll`) or
-  set `CONPTY_DLL_PATH` to its location. The binary also searches the same
-  directory as the executable automatically.
+- `conpty.dll` — **not** part of Windows itself; it is a redistributable
+  from the [Windows Terminal / ConPTY project](https://github.com/microsoft/terminal).
+  The binary searches for it automatically in these locations:
+  1. `CONPTY_DLL_PATH` env var (explicit override)
+  2. Same directory as the executable — easiest: just copy it next to the binary
+  3. `%LOCALAPPDATA%\Microsoft\WindowsApps\conpty.dll` (some installs)
+  4. `C:\Program Files\WezTerm\conpty.dll` — [WezTerm](https://wezfurlong.org/wezterm/) ships it
+
+  If none of those match, download `conpty.dll` from the
+  [Microsoft.Windows.Console.ConPTY NuGet package](https://www.nuget.org/packages/Microsoft.Windows.Console.ConPTY)
+  and copy it next to the binary.
 
 ```powershell
 git clone https://github.com/warpdotdev/wsl-conpty-stdin-repro
 cd wsl-conpty-stdin-repro
 cargo build
-copy "$env:LOCALAPPDATA\Microsoft\WindowsApps\conpty.dll" target\debug\
+# If WezTerm is installed the binary finds conpty.dll automatically.
+# Otherwise copy conpty.dll next to the binary first:
+# copy path\to\conpty.dll target\debug\
 .\target\debug\wsl-stdin-repro.exe Ubuntu
 ```
 

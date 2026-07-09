@@ -171,13 +171,17 @@ mod repro {
 
     /// Search for conpty.dll, trying the following locations in order:
     ///
-    /// 1. `CONPTY_DLL_PATH` env var — explicit override for any install location
-    /// 2. Same directory as this binary — simplest: just `copy conpty.dll target\debug\`
-    /// 3. Windows Terminal (Microsoft Store) — present on most developer machines
-    /// 4. WezTerm — another common terminal that ships conpty.dll
+    /// 1. `CONPTY_DLL_PATH` env var — explicit override
+    /// 2. Same directory as this binary — simplest: just copy conpty.dll next to the exe
+    /// 3. `%LOCALAPPDATA%\Microsoft\WindowsApps\conpty.dll` — present on some installs
+    /// 4. WezTerm — ships conpty.dll at a well-known path
     ///
-    /// Note: we do NOT search Warp's copy.  Warp ships a privately-forked
-    /// conpty.dll that may have different behaviour and would give false results.
+    /// Note: Windows Terminal ships OpenConsole.exe but does NOT include a
+    /// standalone conpty.dll.  If none of the above match, download conpty.dll
+    /// from the Microsoft.Windows.Console.ConPTY NuGet package.
+    ///
+    /// We do NOT search Warp's copy — Warp ships a privately-forked conpty.dll
+    /// that may have different behaviour and would skew results.
     unsafe fn find_conpty_dll() -> Option<Conpty> {
         // 1. Explicit override
         if let Ok(path) = std::env::var("CONPTY_DLL_PATH") {
