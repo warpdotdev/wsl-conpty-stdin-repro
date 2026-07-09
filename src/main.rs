@@ -1,12 +1,7 @@
 //! WSL ConPTY stdin truncation repro
 //!
-//! Uses the standard Windows API — kernel32!CreatePseudoConsole with two
-//! anonymous pipes (stdin / stdout), the same way Windows Terminal does it.
-//! No external DLL required; the ConPTY is hosted by the system conhost.exe.
-//!
-//! The heredoc sends 410 uniform 200-char lines of 'A's (~82 KB total).
-//! bash writes the received character count to a file; we compare it against
-//! what was sent to show both total bytes dropped and approximate line range.
+//! Sends ~82 KB to bash's stdin via a ConPTY and checks how many bytes
+//! arrive.  Uses kernel32!CreatePseudoConsole — no external DLL required.
 //!
 //! Usage: wsl-stdin-repro [DISTRO_NAME]
 
