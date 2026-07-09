@@ -27,12 +27,11 @@ mod repro {
     use mio::windows::NamedPipe;
     use mio::{Events, Interest, Poll, Token};
 
-    use windows::core::{HSTRING, PCWSTR};
     use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
     use windows::Wdk::Storage::FileSystem::{
-        NtCreateFile, FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
-        FILE_PIPE_BYTE_STREAM_MODE, FILE_PIPE_BYTE_STREAM_TYPE, FILE_PIPE_QUEUE_OPERATION,
-        FILE_SYNCHRONOUS_IO_NONALERT, NTCREATEFILE_CREATE_OPTIONS,
+        FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_PIPE_BYTE_STREAM_MODE,
+        FILE_PIPE_BYTE_STREAM_TYPE, FILE_PIPE_QUEUE_OPERATION, FILE_SYNCHRONOUS_IO_NONALERT,
+        NTCREATEFILE_CREATE_OPTIONS, NtCreateFile,
     };
     use windows::Win32::Foundation::{
         CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, NTSTATUS, OBJ_CASE_INSENSITIVE,
@@ -46,12 +45,13 @@ mod repro {
     use windows::Win32::System::IO::IO_STATUS_BLOCK;
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
     use windows::Win32::System::Threading::{
-        CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
-        UpdateProcThreadAttribute, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT,
-        EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-        PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW, STARTUPINFOW,
+        CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+        EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList,
+        LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION,
+        STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute, WaitForSingleObject,
     };
     use windows::Win32::System::WindowsProgramming::RtlInitUnicodeString;
+    use windows::core::{HSTRING, PCWSTR};
 
     // ── Pipe creation (Warp's pipes.rs) ─────────────────────────────────────
 
@@ -164,36 +164,58 @@ mod repro {
         Ok((client, server))
     }
 
-    // ── conpty.dll finder ────────────────────────────────────────────────────
+    // ── conpty.dll finder ──────────────────────────────────────────────────────────────────
 
+    /// Search for conpty.dll, trying the following locations in order:
+    ///
+    /// 1. `CONPTY_DLL_PATH` env var — explicit override for any install location
+    /// 2. Same directory as this binary — simplest: just `copy conpty.dll target\debug\`
+    /// 3. Windows Terminal (Microsoft Store) — present on most developer machines
+    /// 4. WezTerm — another common terminal that ships conpty.dll
+    ///
+    /// Note: we do NOT search Warp's copy.  Warp ships a privately-forked
+    /// conpty.dll that may have different behaviour and would give false results.
     unsafe fn find_conpty_dll() -> Option<Conpty> {
+        // 1. Explicit override
         if let Ok(path) = std::env::var("CONPTY_DLL_PATH") {
-            if let Ok(c) = Conpty::load(&path) { return Some(c); }
+            if let Ok(c) = Conpty::load(&path) {
+                return Some(c);
+            }
         }
+
+        // 2. Sibling of this binary (most convenient for users: just copy conpty.dll next to it)
         if let Ok(exe) = std::env::current_exe() {
             let sibling = exe.with_file_name("conpty.dll");
-            if let Ok(c) = Conpty::load(sibling.to_str()?) { return Some(c); }
+            if let Ok(c) = Conpty::load(sibling.to_str()?) {
+                return Some(c);
+            }
         }
+
+        // 3. Windows Terminal (Microsoft Store install puts it in WindowsApps)
         let local_app = std::env::var("LOCALAPPDATA").unwrap_or_default();
         let wt = format!(r"{}\Microsoft\WindowsApps\conpty.dll", local_app);
-        if let Ok(c) = Conpty::load(&wt) { return Some(c); }
-        for path in &[
-            r"C:\Program Files\WezTerm\conpty.dll",
-            r"C:\Users\dev\warp\warp\target\debug\conpty.dll",
-            r"C:\Users\dev\warp\warp\app\assets\windows\x64\conpty.dll",
-        ] {
-            if let Ok(c) = Conpty::load(path) { return Some(c); }
+        if let Ok(c) = Conpty::load(&wt) {
+            return Some(c);
         }
+
+        // 4. WezTerm ships its own conpty.dll
+        if let Ok(c) = Conpty::load(r"C:\Program Files\WezTerm\conpty.dll") {
+            return Some(c);
+        }
+
         None
     }
 
     // ── ConPTY loader (Warp's conpty_api.rs) ────────────────────────────────
 
-    type CreateFn = unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON)
-        -> windows::core::HRESULT;
-    type CloseFn  = unsafe extern "system" fn(HPCON);
+    type CreateFn =
+        unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> windows::core::HRESULT;
+    type CloseFn = unsafe extern "system" fn(HPCON);
 
-    struct Conpty { create: CreateFn, close: CloseFn }
+    struct Conpty {
+        create: CreateFn,
+        close: CloseFn,
+    }
 
     impl Conpty {
         unsafe fn load(path: &str) -> windows::core::Result<Self> {
@@ -203,13 +225,13 @@ mod repro {
                 ($name:literal, $ty:ty) => {
                     mem::transmute::<_, $ty>(
                         GetProcAddress(m, windows::core::s!($name))
-                            .expect(concat!("conpty.dll missing ", $name))
+                            .expect(concat!("conpty.dll missing ", $name)),
                     )
                 };
             }
             Ok(Conpty {
                 create: sym!("CreatePseudoConsole", CreateFn),
-                close:  sym!("ClosePseudoConsole",  CloseFn),
+                close: sym!("ClosePseudoConsole", CloseFn),
             })
         }
 
@@ -225,7 +247,9 @@ mod repro {
 
     // ── ProcThreadAttributeList (Warp's proc_thread_attribute_list.rs) ──────
 
-    struct AttrList { data: Box<[u8]> }
+    struct AttrList {
+        data: Box<[u8]>,
+    }
 
     impl AttrList {
         unsafe fn new() -> windows::core::Result<Self> {
@@ -241,14 +265,20 @@ mod repro {
         }
         unsafe fn set_conpty(&mut self, pty: HPCON) -> windows::core::Result<()> {
             UpdateProcThreadAttribute(
-                self.ptr(), 0,
+                self.ptr(),
+                0,
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-                Some(pty.0 as _), size_of::<HPCON>(), None, None,
+                Some(pty.0 as _),
+                size_of::<HPCON>(),
+                None,
+                None,
             )
         }
     }
     impl Drop for AttrList {
-        fn drop(&mut self) { unsafe { DeleteProcThreadAttributeList(self.ptr()) }; }
+        fn drop(&mut self) {
+            unsafe { DeleteProcThreadAttributeList(self.ptr()) };
+        }
     }
 
     // ── Process spawn (Warp's windows/mod.rs) ───────────────────────────────
@@ -256,9 +286,12 @@ mod repro {
     fn spawn_bash(distro: Option<&str>, pty: HPCON) -> windows::core::Result<PROCESS_INFORMATION> {
         let cmd_s = match distro {
             Some(d) => format!("wsl.exe --distribution {} -- bash --norc --noprofile", d),
-            None    => "wsl.exe -- bash --norc --noprofile".to_owned(),
+            None => "wsl.exe -- bash --norc --noprofile".to_owned(),
         };
-        let mut cmd_wide: Vec<u16> = OsString::from(&cmd_s).encode_wide().chain(Some(0)).collect();
+        let mut cmd_wide: Vec<u16> = OsString::from(&cmd_s)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
         let mut attrs = unsafe { AttrList::new()? };
         unsafe { attrs.set_conpty(pty)? };
         let mut si = STARTUPINFOEXW::default();
@@ -269,9 +302,12 @@ mod repro {
             CreateProcessW(
                 PCWSTR::null(),
                 Some(windows::core::PWSTR(cmd_wide.as_mut_ptr())),
-                None, None, false,
+                None,
+                None,
+                false,
                 EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-                None, PCWSTR::null(),
+                None,
+                PCWSTR::null(),
                 &si.StartupInfo as *const STARTUPINFOW,
                 &mut pi,
             )?;
@@ -287,41 +323,61 @@ mod repro {
     fn event_loop(server: HANDLE, data: &[u8], deadline: Instant) -> io::Result<usize> {
         let mut pipe = unsafe { NamedPipe::from_raw_handle(server.0 as *mut _) };
         let mut poll = Poll::new()?;
-        poll.registry().register(&mut pipe, TOK, Interest::READABLE | Interest::WRITABLE)?;
+        poll.registry()
+            .register(&mut pipe, TOK, Interest::READABLE | Interest::WRITABLE)?;
 
         let mut events = Events::with_capacity(64);
         let mut write_pos = 0usize;
         let mut total_written = 0usize;
-        let mut can_read  = true;
+        let mut can_read = true;
         let mut can_write = true;
 
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() { break; }
+            if remaining.is_zero() {
+                break;
+            }
             poll.poll(&mut events, Some(remaining.min(Duration::from_millis(50))))?;
             for ev in &events {
                 if ev.token() == TOK {
-                    if ev.is_readable() { can_read  = true; }
-                    if ev.is_writable() { can_write = true; }
+                    if ev.is_readable() {
+                        can_read = true;
+                    }
+                    if ev.is_writable() {
+                        can_write = true;
+                    }
                 }
             }
             if can_read {
                 let mut buf = [0u8; 4096];
                 loop {
                     match pipe.read(&mut buf) {
-                        Ok(0) | Err(_) => { can_read = false; break; }
+                        Ok(0) | Err(_) => {
+                            can_read = false;
+                            break;
+                        }
                         Ok(_) => {}
                     }
                 }
             }
             if can_write && write_pos < data.len() {
                 match pipe.write(&data[write_pos..]) {
-                    Ok(n)  => { write_pos += n; total_written += n; }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => { can_write = false; }
-                    Err(e) => { eprintln!("  write error at {}: {}", write_pos, e); break; }
+                    Ok(n) => {
+                        write_pos += n;
+                        total_written += n;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        can_write = false;
+                    }
+                    Err(e) => {
+                        eprintln!("  write error at {}: {}", write_pos, e);
+                        break;
+                    }
                 }
             }
-            if write_pos >= data.len() { break; }
+            if write_pos >= data.len() {
+                break;
+            }
         }
         Ok(total_written)
     }
@@ -332,9 +388,9 @@ mod repro {
     // 200-char lines with a shorter last line (same as the first working test).
     // This exact byte layout is known to let EOM through on pre-release WSL
     // while still dropping content in the middle.
-    const CONTENT:   usize = 81_920;  // total 'A' bytes in the heredoc
-    const LINE_LEN:  usize = 200;     // chars per full line
-    const RESULT:    &str  = "/tmp/wsl_repro.txt";
+    const CONTENT: usize = 81_920; // total 'A' bytes in the heredoc
+    const LINE_LEN: usize = 200; // chars per full line
+    const RESULT: &str = "/tmp/wsl_repro.txt";
 
     pub fn run(distro: Option<&str>) {
         // Build lines: full 200-char lines then a shorter remainder if needed
@@ -345,14 +401,16 @@ mod repro {
             lines.push(vec![b'A'; n]);
             left -= n;
         }
-        let n_lines      = lines.len();
+        let n_lines = lines.len();
         // Content bytes = sum of line lengths + one newline per line
         let content_bytes = CONTENT + n_lines;
 
         println!("============================================================");
         println!("WSL ConPTY stdin truncation repro (Rust)");
-        println!("  Content : {} A-chars in {} lines ({} bytes with newlines)",
-                 CONTENT, n_lines, content_bytes);
+        println!(
+            "  Content : {} A-chars in {} lines ({} bytes with newlines)",
+            CONTENT, n_lines, content_bytes
+        );
         println!("  Distro  : {}", distro.unwrap_or("(default)"));
         println!("============================================================\n");
 
@@ -363,16 +421,20 @@ mod repro {
         let conpty = unsafe {
             find_conpty_dll().expect(
                 "conpty.dll not found. Copy it to the same directory as this binary, \
-                 or set CONPTY_DLL_PATH."
+                 or set CONPTY_DLL_PATH.",
             )
         };
         let pty = unsafe {
-            conpty.create_pty(COORD { X: 220, Y: 50 }, client).expect("CreatePseudoConsole")
+            conpty
+                .create_pty(COORD { X: 220, Y: 50 }, client)
+                .expect("CreatePseudoConsole")
         };
 
         // 3. Spawn wsl.exe -- bash as ConPTY child
         let pi = spawn_bash(distro, pty).expect("spawn_bash");
-        unsafe { let _ = CloseHandle(pi.hThread); }
+        unsafe {
+            let _ = CloseHandle(pi.hThread);
+        }
         println!("Waiting 3 s for bash to start…");
         std::thread::sleep(Duration::from_secs(3));
 
@@ -381,7 +443,9 @@ mod repro {
         hd.extend_from_slice(b" read -r -d '' VAR << 'EOM'\n");
         for (i, line) in lines.iter().enumerate() {
             hd.extend_from_slice(line);
-            if i + 1 < n_lines { hd.push(b'\n'); }
+            if i + 1 < n_lines {
+                hd.push(b'\n');
+            }
         }
         hd.extend_from_slice(b"\nEOM\n");
         // echo ${#VAR} writes a single small number — no stdout backpressure
@@ -393,7 +457,11 @@ mod repro {
         // 5. mio event loop — reads ConPTY output and writes stdin concurrently
         let deadline = Instant::now() + Duration::from_secs(30);
         let written = event_loop(server, &hd, deadline).unwrap_or(0);
-        println!("Event loop done: {}/{} raw bytes delivered.\n", written, hd.len());
+        println!(
+            "Event loop done: {}/{} raw bytes delivered.\n",
+            written,
+            hd.len()
+        );
 
         // 6. Wait for bash to exit
         println!("Waiting up to 30 s for bash to exit…");
@@ -418,7 +486,9 @@ mod repro {
         }
         args.extend_from_slice(&["--".into(), "cat".into(), RESULT.into()]);
         let out = Command::new(r"C:\Windows\System32\wsl.exe")
-            .args(&args).output().expect("wsl cat");
+            .args(&args)
+            .output()
+            .expect("wsl cat");
         let received = String::from_utf8_lossy(&out.stdout);
 
         // bash wrote ${#VAR} — the character count of what it received.
@@ -439,16 +509,23 @@ mod repro {
 
         if bash_count >= content_bytes {
             println!("============================================================");
-            println!("  [OK] All {} chars received. Bug not reproduced.", bash_count);
+            println!(
+                "  [OK] All {} chars received. Bug not reproduced.",
+                bash_count
+            );
             return;
         }
 
-        println!("  Lines dropped  : ~{} ({:.1}%)",
-                 n_lines.saturating_sub(lines_received),
-                 dropped_bytes as f64 / content_bytes as f64 * 100.0);
-        println!("  Bytes dropped  : {} ({:.1}%)",
-                 dropped_bytes,
-                 dropped_bytes as f64 / content_bytes as f64 * 100.0);
+        println!(
+            "  Lines dropped  : ~{} ({:.1}%)",
+            n_lines.saturating_sub(lines_received),
+            dropped_bytes as f64 / content_bytes as f64 * 100.0
+        );
+        println!(
+            "  Bytes dropped  : {} ({:.1}%)",
+            dropped_bytes,
+            dropped_bytes as f64 / content_bytes as f64 * 100.0
+        );
         println!("============================================================");
         println!("  [BUG CONFIRMED]");
     }
