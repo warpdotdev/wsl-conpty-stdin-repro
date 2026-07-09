@@ -1,14 +1,17 @@
 //! WSL ConPTY stdin truncation repro (Rust)
 //!
 //! Ports the relevant parts of Warp's Windows PTY stack:
-//!   - pipes.rs                      : bidirectional named pipe via NtCreateNamedPipeFile
-//!   - conpty_api.rs                 : loads conpty.dll, passes SAME handle for hInput+hOutput
-//!   - proc_thread_attribute_list.rs : ProcThreadAttributeList wrapper
-//!   - windows/mod.rs                : CreateProcessW with ConPTY attribute
-//!   - event_loop.rs                 : mio read+write loop with WouldBlock handling
+//!   - pipes.rs       : bidirectional named pipe via NtCreateNamedPipeFile
+//!   - conpty_api.rs  : loads conpty.dll, passes SAME handle for hInput+hOutput
+//!   - windows/mod.rs : CreateProcessW with ConPTY attribute
+//!   - event_loop.rs  : mio read+write loop with WouldBlock handling
 //!
-//! Usage: wsl-stdin-repro [SIZE_BYTES] [DISTRO_NAME]
-//!   Default: 81920 bytes, default distro
+//! The heredoc sends 410 uniform 200-char lines of 'A's (~82 KB total).
+//! bash writes the received content to a file; we read it back and compare
+//! line count received vs. sent — showing both total bytes dropped and
+//! approximate drop location, in a single run.
+//!
+//! Usage: wsl-stdin-repro [DISTRO_NAME]
 
 #[cfg(windows)]
 mod repro {
@@ -50,7 +53,7 @@ mod repro {
     };
     use windows::Win32::System::WindowsProgramming::RtlInitUnicodeString;
 
-    // ── Bidirectional pipe (Warp's pipes.rs) ────────────────────────────────
+    // ── Pipe creation (Warp's pipes.rs) ─────────────────────────────────────
 
     const BUFFER_SIZE: u32 = 128 * 1024;
 
@@ -81,10 +84,9 @@ mod repro {
         }
     }
 
-    /// Bidirectional pipe exactly as Warp's pipes.rs.
-    /// Returns (client, server):
-    ///   client → passed to ConPTY as BOTH hInput and hOutput
-    ///   server → host reads output AND writes input via mio
+    /// Bidirectional pipe (Warp's pipes.rs).  Returns (client, server).
+    /// client → passed to ConPTY as BOTH hInput and hOutput
+    /// server → host reads output AND writes input via mio
     unsafe fn create_duplex_pipe() -> windows::core::Result<(HANDLE, HANDLE)> {
         let mut dev_path = UNICODE_STRING::default();
         RtlInitUnicodeString(&mut dev_path, windows::core::w!(r"\Device\NamedPipe\"));
@@ -125,7 +127,7 @@ mod repro {
             &mut oa2,
             &mut iosb2,
             share.0,
-            FILE_CREATE.0,                         // CreateDisposition
+            FILE_CREATE.0,
             NTCREATEFILE_CREATE_OPTIONS::default().0, // async (overlapped)
             FILE_PIPE_BYTE_STREAM_TYPE,
             FILE_PIPE_BYTE_STREAM_MODE,
@@ -164,48 +166,34 @@ mod repro {
 
     // ── conpty.dll finder ────────────────────────────────────────────────────
 
-    /// Search well-known locations for conpty.dll.
-    /// Prefers CONPTY_DLL_PATH env var if set.
     unsafe fn find_conpty_dll() -> Option<Conpty> {
-        // 1. Env var override
         if let Ok(path) = std::env::var("CONPTY_DLL_PATH") {
             if let Ok(c) = Conpty::load(&path) { return Some(c); }
         }
-
-        // 2. Same directory as our binary
         if let Ok(exe) = std::env::current_exe() {
             let sibling = exe.with_file_name("conpty.dll");
             if let Ok(c) = Conpty::load(sibling.to_str()?) { return Some(c); }
         }
-
-        // 3. Windows Terminal (Microsoft Store)
         let local_app = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        let wt_glob = format!(r"{}\Microsoft\WindowsApps\conpty.dll", local_app);
-        if let Ok(c) = Conpty::load(&wt_glob) { return Some(c); }
-
-        // 4. WezTerm
-        let wezterm = r"C:\Program Files\WezTerm\conpty.dll";
-        if let Ok(c) = Conpty::load(wezterm) { return Some(c); }
-
-        // 5. Warp dev build paths (developer convenience)
+        let wt = format!(r"{}\Microsoft\WindowsApps\conpty.dll", local_app);
+        if let Ok(c) = Conpty::load(&wt) { return Some(c); }
         for path in &[
+            r"C:\Program Files\WezTerm\conpty.dll",
             r"C:\Users\dev\warp\warp\target\debug\conpty.dll",
             r"C:\Users\dev\warp\warp\app\assets\windows\x64\conpty.dll",
         ] {
             if let Ok(c) = Conpty::load(path) { return Some(c); }
         }
-
         None
     }
 
     // ── ConPTY loader (Warp's conpty_api.rs) ────────────────────────────────
 
-    type CreateFn  = unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON)
+    type CreateFn = unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON)
         -> windows::core::HRESULT;
-    type CloseFn   = unsafe extern "system" fn(HPCON);
-    type ReleaseFn = unsafe extern "system" fn(HPCON) -> windows::core::HRESULT;
+    type CloseFn  = unsafe extern "system" fn(HPCON);
 
-    struct Conpty { create: CreateFn, close: CloseFn, release: ReleaseFn }
+    struct Conpty { create: CreateFn, close: CloseFn }
 
     impl Conpty {
         unsafe fn load(path: &str) -> windows::core::Result<Self> {
@@ -220,9 +208,8 @@ mod repro {
                 };
             }
             Ok(Conpty {
-                create:  sym!("CreatePseudoConsole",  CreateFn),
-                close:   sym!("ClosePseudoConsole",   CloseFn),
-                release: sym!("ReleasePseudoConsole", ReleaseFn),
+                create: sym!("CreatePseudoConsole", CreateFn),
+                close:  sym!("ClosePseudoConsole",  CloseFn),
             })
         }
 
@@ -231,7 +218,7 @@ mod repro {
         unsafe fn create_pty(&self, size: COORD, mut pipe: HANDLE) -> windows::core::Result<HPCON> {
             let mut pty = HPCON::default();
             (self.create)(size, pipe, pipe, 0, &mut pty).ok()?;
-            let _ = CloseHandle(pipe); // ConPTY takes sole ownership
+            let _ = CloseHandle(pipe);
             Ok(pty)
         }
     }
@@ -249,26 +236,19 @@ mod repro {
             InitializeProcThreadAttributeList(Some(ptr), 1, None, &mut bytes)?;
             Ok(Self { data })
         }
-
         fn ptr(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
             LPPROC_THREAD_ATTRIBUTE_LIST(self.data.as_mut_ptr() as _)
         }
-
         unsafe fn set_conpty(&mut self, pty: HPCON) -> windows::core::Result<()> {
             UpdateProcThreadAttribute(
                 self.ptr(), 0,
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-                Some(pty.0 as _),
-                size_of::<HPCON>(),
-                None, None,
+                Some(pty.0 as _), size_of::<HPCON>(), None, None,
             )
         }
     }
-
     impl Drop for AttrList {
-        fn drop(&mut self) {
-            unsafe { DeleteProcThreadAttributeList(self.ptr()) };
-        }
+        fn drop(&mut self) { unsafe { DeleteProcThreadAttributeList(self.ptr()) }; }
     }
 
     // ── Process spawn (Warp's windows/mod.rs) ───────────────────────────────
@@ -279,15 +259,12 @@ mod repro {
             None    => "wsl.exe -- bash --norc --noprofile".to_owned(),
         };
         let mut cmd_wide: Vec<u16> = OsString::from(&cmd_s).encode_wide().chain(Some(0)).collect();
-
         let mut attrs = unsafe { AttrList::new()? };
         unsafe { attrs.set_conpty(pty)? };
-
         let mut si = STARTUPINFOEXW::default();
         si.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
         si.lpAttributeList = attrs.ptr();
         let mut pi = PROCESS_INFORMATION::default();
-
         unsafe {
             CreateProcessW(
                 PCWSTR::null(),
@@ -308,7 +285,6 @@ mod repro {
     const TOK: Token = Token(0);
 
     fn event_loop(server: HANDLE, data: &[u8], deadline: Instant) -> io::Result<usize> {
-        // SAFETY: we own server and keep it alive for the duration of this function
         let mut pipe = unsafe { NamedPipe::from_raw_handle(server.0 as *mut _) };
         let mut poll = Poll::new()?;
         poll.registry().register(&mut pipe, TOK, Interest::READABLE | Interest::WRITABLE)?;
@@ -322,7 +298,6 @@ mod repro {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() { break; }
-
             poll.poll(&mut events, Some(remaining.min(Duration::from_millis(50))))?;
             for ev in &events {
                 if ev.token() == TOK {
@@ -330,8 +305,6 @@ mod repro {
                     if ev.is_writable() { can_write = true; }
                 }
             }
-
-            // Drain output (keeps bash from blocking on its stdout)
             if can_read {
                 let mut buf = [0u8; 4096];
                 loop {
@@ -341,8 +314,6 @@ mod repro {
                     }
                 }
             }
-
-            // Write next chunk to stdin
             if can_write && write_pos < data.len() {
                 match pipe.write(&data[write_pos..]) {
                     Ok(n)  => { write_pos += n; total_written += n; }
@@ -350,168 +321,84 @@ mod repro {
                     Err(e) => { eprintln!("  write error at {}: {}", write_pos, e); break; }
                 }
             }
-
             if write_pos >= data.len() { break; }
         }
         Ok(total_written)
     }
 
-    // ── Gap finder ───────────────────────────────────────────────────────────
-    //
-    // Sends 500 lines numbered 000000..499999 (each exactly 8 bytes: "NNNNNN\n").
-    // Writes $VAR to a file and checks which line numbers are present / absent.
-    // Run: wsl-stdin-repro 0 Ubuntu --find-gap
-
-    pub fn find_gap(distro: Option<&str>) {
-        println!("Finding gap: 500 numbered lines → 4000 bytes total\n");
-
-        let (client, server) = unsafe { create_duplex_pipe().expect("pipe") };
-        let conpty = unsafe { find_conpty_dll().expect("conpty.dll") };
-        let pty = unsafe { conpty.create_pty(COORD { X: 220, Y: 50 }, client).expect("ConPTY") };
-        let pi  = spawn_bash(distro, pty).expect("bash");
-        unsafe { let _ = CloseHandle(pi.hThread); }
-
-        std::thread::sleep(Duration::from_secs(3));
-
-        // Build content: 500 lines, each "NNNNNN\n" (line number zero-padded)
-        // That's 500 * 7 = 3500 bytes of content.
-        let n_lines: usize = 2500;  // 2500 * 7 = 17.5 KB
-        let result_file = "/tmp/wsl_gap.txt";
-
-        let mut content = Vec::<u8>::new();
-        for i in 0..n_lines {
-            content.extend_from_slice(format!("{:06}\n", i).as_bytes());
-        }
-        let content_len = content.len(); // should be 3500
-
-        let mut hd: Vec<u8> = Vec::new();
-        hd.extend_from_slice(b" read -r -d '' VAR << 'EOM'\n");
-        hd.extend_from_slice(&content);
-        hd.extend_from_slice(b"EOM\n");
-        // Write VAR to file, then exit
-        hd.extend_from_slice(format!(" printf '%s' \"$VAR\" > {}\n", result_file).as_bytes());
-        hd.extend_from_slice(b" exit\n");
-
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let _written = event_loop(server, &hd, deadline).unwrap_or(0);
-
-        let w = unsafe { WaitForSingleObject(pi.hProcess, 20_000) };
-        unsafe { let _ = CloseHandle(pi.hProcess); (conpty.close)(pty); }
-
-        if w.0 == 0x00000102 {
-            println!("  [BUG] bash timed out — EOM never arrived.");
-            return;
-        }
-
-        // Read the result file
-        let mut args: Vec<String> = Vec::new();
-        if let Some(d) = distro { args.extend_from_slice(&["--distribution".into(), d.into()]); }
-        args.extend_from_slice(&["--".into(), "cat".into(), result_file.into()]);
-        let out = Command::new(r"C:\Windows\System32\wsl.exe").args(&args).output().expect("cat");
-        let received = String::from_utf8_lossy(&out.stdout);
-
-        // Parse which line numbers are present
-        let present: std::collections::BTreeSet<usize> = received
-            .split('\n')
-            .filter_map(|s| s.trim().parse().ok())
-            .collect();
-
-        println!("Content sent   : {} bytes ({} lines)", content_len, n_lines);
-        println!("Bytes received : {}", received.len());
-        println!("Lines received : {}", present.len());
-
-        if present.len() == n_lines {
-            println!("  [OK] All {} lines present — no drops at this size.", n_lines);
-            return;
-        }
-
-        // Find first missing line
-        let first_missing = (0..n_lines).find(|i| !present.contains(i));
-        let last_present  = present.iter().next_back().copied();
-        println!("  First missing line : {:?}  (byte offset ~{:?})",
-            first_missing,
-            first_missing.map(|i| i * 7));
-        println!("  Last present line  : {:?}  (byte offset ~{:?})",
-            last_present,
-            last_present.map(|i| i * 7));
-
-        // Print a short summary of the gap
-        let missing: Vec<usize> = (0..n_lines).filter(|i| !present.contains(i)).collect();
-        if missing.len() <= 10 {
-            println!("  Missing lines: {:?}", missing);
-        } else {
-            println!("  Missing lines: {:?} … {:?} ({} total)",
-                &missing[..5], &missing[missing.len()-5..], missing.len());
-        }
-    }
-
     // ── Main ─────────────────────────────────────────────────────────────────
 
-    pub fn run(content_bytes: usize, distro: Option<&str>) {
+    // Total content size matches Warp's shell integration script (~80 KB).
+    // 200-char lines with a shorter last line (same as the first working test).
+    // This exact byte layout is known to let EOM through on pre-release WSL
+    // while still dropping content in the middle.
+    const CONTENT:   usize = 81_920;  // total 'A' bytes in the heredoc
+    const LINE_LEN:  usize = 200;     // chars per full line
+    const RESULT:    &str  = "/tmp/wsl_repro.txt";
+
+    pub fn run(distro: Option<&str>) {
+        // Build lines: full 200-char lines then a shorter remainder if needed
+        let mut lines: Vec<Vec<u8>> = Vec::new();
+        let mut left = CONTENT;
+        while left > 0 {
+            let n = left.min(LINE_LEN);
+            lines.push(vec![b'A'; n]);
+            left -= n;
+        }
+        let n_lines      = lines.len();
+        // Content bytes = sum of line lengths + one newline per line
+        let content_bytes = CONTENT + n_lines;
+
         println!("============================================================");
         println!("WSL ConPTY stdin truncation repro (Rust)");
-        println!("  Content bytes : {} ({:.1} KB)", content_bytes, content_bytes as f64 / 1024.0);
-        println!("  Distro        : {}", distro.unwrap_or("(default)"));
+        println!("  Content : {} A-chars in {} lines ({} bytes with newlines)",
+                 CONTENT, n_lines, content_bytes);
+        println!("  Distro  : {}", distro.unwrap_or("(default)"));
         println!("============================================================\n");
 
-        // 1. Bidirectional pipe (Warp's pipes.rs approach)
-        let (client, server) = unsafe {
-            create_duplex_pipe().expect("create_duplex_pipe")
-        };
-        println!("Pipe: client={:?}  server={:?}", client, server);
+        // 1. Bidirectional pipe
+        let (client, server) = unsafe { create_duplex_pipe().expect("create_duplex_pipe") };
 
-        // 2. Load conpty.dll; pass same handle as hInput AND hOutput (Warp's approach)
-        // Search common locations: local dir, Windows Terminal, WezTerm, Warp dev builds
+        // 2. ConPTY — same handle for both hInput and hOutput (Warp's approach)
         let conpty = unsafe {
             find_conpty_dll().expect(
-                "conpty.dll not found. Copy it from Windows Terminal or WezTerm \
-                 to the same directory as this binary, or set CONPTY_DLL_PATH."
+                "conpty.dll not found. Copy it to the same directory as this binary, \
+                 or set CONPTY_DLL_PATH."
             )
         };
         let pty = unsafe {
             conpty.create_pty(COORD { X: 220, Y: 50 }, client).expect("CreatePseudoConsole")
         };
-        println!("ConPTY: {:?}", pty);
 
         // 3. Spawn wsl.exe -- bash as ConPTY child
         let pi = spawn_bash(distro, pty).expect("spawn_bash");
         unsafe { let _ = CloseHandle(pi.hThread); }
-
         println!("Waiting 3 s for bash to start…");
         std::thread::sleep(Duration::from_secs(3));
 
-        // 4. Build heredoc (same structure as Warp's bash.sh bootstrap)
-        let result_file = "/tmp/wsl_repro.txt";
-        let line_w = 200;
-        let mut lines: Vec<Vec<u8>> = Vec::new();
-        let mut left = content_bytes;
-        while left > 0 {
-            let n = left.min(line_w);
-            lines.push(vec![b'A'; n]);
-            left -= n;
-        }
-
+        // 4. Build heredoc using the pre-computed lines.
         let mut hd: Vec<u8> = Vec::new();
         hd.extend_from_slice(b" read -r -d '' VAR << 'EOM'\n");
         for (i, line) in lines.iter().enumerate() {
             hd.extend_from_slice(line);
-            if i + 1 < lines.len() { hd.push(b'\n'); }
+            if i + 1 < n_lines { hd.push(b'\n'); }
         }
         hd.extend_from_slice(b"\nEOM\n");
-        hd.extend_from_slice(format!(" echo ${{#VAR}} > {}\n", result_file).as_bytes());
+        // echo ${#VAR} writes a single small number — no stdout backpressure
+        hd.extend_from_slice(format!(" echo ${{#VAR}} > {}\n", RESULT).as_bytes());
         hd.extend_from_slice(b" exit\n");
 
-        println!("Sending {} raw bytes (content={}) via ConPTY stdin…", hd.len(), content_bytes);
+        println!("Sending {} raw bytes via ConPTY stdin…", hd.len());
 
-        // 5. mio event loop — reads bash output + writes heredoc concurrently
+        // 5. mio event loop — reads ConPTY output and writes stdin concurrently
         let deadline = Instant::now() + Duration::from_secs(30);
         let written = event_loop(server, &hd, deadline).unwrap_or(0);
-        println!("Event loop done: {}/{} raw bytes delivered.", written, hd.len());
+        println!("Event loop done: {}/{} raw bytes delivered.\n", written, hd.len());
 
-        // 6. Wait for bash to exit (up to 30 s)
+        // 6. Wait for bash to exit
         println!("Waiting up to 30 s for bash to exit…");
         let w = unsafe { WaitForSingleObject(pi.hProcess, 30_000) };
-        let timed_out = w.0 == 0x00000102; // WAIT_TIMEOUT
+        let timed_out = w.0 == 0x00000102;
         unsafe {
             let _ = CloseHandle(pi.hProcess);
             (conpty.close)(pty);
@@ -519,57 +406,59 @@ mod repro {
 
         if timed_out {
             println!();
-            println!("  [BUG] bash timed out — EOM was dropped, bash is stuck waiting.");
-            println!("  wsl.exe's StandardInputRelay is NOT delivering all stdin bytes.");
+            println!("  [BUG] bash timed out — EOM was dropped.");
+            println!("  wsl.exe is not delivering all ConPTY stdin bytes.");
             return;
         }
 
-        // 7. Read result via a plain wsl pipe invocation (no ConPTY, known to work)
-        println!("\nReading {} via plain wsl…", result_file);
+        // 7. Read result file via plain wsl (not ConPTY — known to work)
         let mut args: Vec<String> = Vec::new();
         if let Some(d) = distro {
             args.extend_from_slice(&["--distribution".into(), d.into()]);
         }
-        args.extend_from_slice(&["--".into(), "cat".into(), result_file.into()]);
+        args.extend_from_slice(&["--".into(), "cat".into(), RESULT.into()]);
         let out = Command::new(r"C:\Windows\System32\wsl.exe")
-            .args(&args)
-            .output()
-            .expect("wsl cat");
-        let raw = String::from_utf8_lossy(&out.stdout);
-        let received: Option<usize> = raw
-            .split_whitespace()
-            .filter_map(|s| s.parse().ok())
-            .next_back();
+            .args(&args).output().expect("wsl cat");
+        let received = String::from_utf8_lossy(&out.stdout);
+
+        // bash wrote ${#VAR} — the character count of what it received.
+        // Expected if all bytes arrived: content_bytes (A's + newlines).
+        let bash_count: usize = received.trim().parse().unwrap_or(0);
+        let dropped_bytes = content_bytes.saturating_sub(bash_count);
+        // Estimate lines dropped (each full line = LINE_LEN + 1 chars)
+        let lines_received = bash_count / (LINE_LEN + 1);
+        let received_bytes = bash_count;
 
         println!();
         println!("============================================================");
         println!("RESULTS");
-        println!("  Content bytes sent   : {}", content_bytes);
-        println!("  Bytes bash recorded  : {:?}", received);
-        println!("============================================================");
-        match received {
-            None => println!("  [INCONCLUSIVE] Could not read result file."),
-            Some(n) if n < content_bytes => {
-                let d = content_bytes - n;
-                println!("  [BUG CONFIRMED] {} bytes dropped ({:.1}%)!", d, d as f64 / content_bytes as f64 * 100.0);
-            }
-            Some(_) => println!("  [OK] All bytes received. Bug not reproduced at this size."),
+        println!("  Lines sent     : {}", n_lines);
+        println!("  Lines received : ~{}", lines_received);
+        println!("  Bytes sent     : {}", content_bytes);
+        println!("  Bytes received : {}", received_bytes);
+
+        if bash_count >= content_bytes {
+            println!("============================================================");
+            println!("  [OK] All {} chars received. Bug not reproduced.", bash_count);
+            return;
         }
+
+        println!("  Lines dropped  : ~{} ({:.1}%)",
+                 n_lines.saturating_sub(lines_received),
+                 dropped_bytes as f64 / content_bytes as f64 * 100.0);
+        println!("  Bytes dropped  : {} ({:.1}%)",
+                 dropped_bytes,
+                 dropped_bytes as f64 / content_bytes as f64 * 100.0);
+        println!("============================================================");
+        println!("  [BUG CONFIRMED]");
     }
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let size: usize  = args.next().and_then(|s| s.parse().ok()).unwrap_or(81920);
-    let distro = args.next();
-    let find_gap = args.next().map(|s| s == "--find-gap").unwrap_or(false);
+    let distro = std::env::args().nth(1);
 
     #[cfg(windows)]
-    if find_gap {
-        repro::find_gap(distro.as_deref());
-    } else {
-        repro::run(size, distro.as_deref());
-    }
+    repro::run(distro.as_deref());
 
     #[cfg(not(windows))]
     eprintln!("Windows only.");
