@@ -14,6 +14,9 @@
 //! Usage: wsl-stdin-repro [DISTRO_NAME]
 
 #[cfg(windows)]
+// All functions touching Win32 APIs are already marked `unsafe fn`;
+// we don't need redundant `unsafe { }` blocks inside them.
+#[allow(unsafe_op_in_unsafe_fn)]
 mod repro {
     use std::ffi::OsString;
     use std::io::{self, Read, Write};
@@ -237,7 +240,7 @@ mod repro {
 
         /// Exact copy of Warp's conpty_api.rs::create:
         /// pass the SAME handle for both hInput and hOutput, then free our copy.
-        unsafe fn create_pty(&self, size: COORD, mut pipe: HANDLE) -> windows::core::Result<HPCON> {
+        unsafe fn create_pty(&self, size: COORD, pipe: HANDLE) -> windows::core::Result<HPCON> {
             let mut pty = HPCON::default();
             (self.create)(size, pipe, pipe, 0, &mut pty).ok()?;
             let _ = CloseHandle(pipe);
