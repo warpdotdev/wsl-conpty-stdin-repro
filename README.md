@@ -18,7 +18,7 @@ git clone https://github.com/warpdotdev/wsl-conpty-stdin-repro
 cd wsl-conpty-stdin-repro
 cargo build
 copy "$env:LOCALAPPDATA\Microsoft\WindowsApps\conpty.dll" target\debug\
-.\target\debug\wsl-stdin-repro.exe 81920 Ubuntu
+.\target\debug\wsl-stdin-repro.exe Ubuntu
 ```
 
 ### Output on WSL 2.9.3 (broken)
@@ -26,22 +26,27 @@ copy "$env:LOCALAPPDATA\Microsoft\WindowsApps\conpty.dll" target\debug\
 ```
 ============================================================
 WSL ConPTY stdin truncation repro (Rust)
-  Content bytes : 81920 (80.0 KB)
-  Distro        : Ubuntu
+  Content : 81920 A-chars in 410 lines (82330 bytes with newlines)
+  Distro  : Ubuntu
 ============================================================
 
   Spawned: wsl.exe --distribution Ubuntu -- bash --norc --noprofile  PID=2512
 Waiting 3 s for bash to start…
-Sending 82403 raw bytes (content=81920) via ConPTY stdin…
+Sending 82403 raw bytes via ConPTY stdin…
 Event loop done: 82403/82403 raw bytes delivered.
+
 Waiting up to 30 s for bash to exit…
 
 ============================================================
 RESULTS
-  Content bytes sent   : 81920
-  Bytes bash received  : Some(62361)
+  Lines sent     : 410
+  Lines received : ~310
+  Bytes sent     : 82330
+  Bytes received : 62361
+  Lines dropped  : ~100 (24.3%)
+  Bytes dropped  : 19969 (24.3%)
 ============================================================
-  [BUG CONFIRMED] 19559 bytes dropped (23.9%)!
+  [BUG CONFIRMED]
 ```
 
 ### Output on WSL 2.7.10 (working)
@@ -49,22 +54,23 @@ RESULTS
 ```
 ============================================================
 RESULTS
-  Content bytes sent   : 81920
-  Bytes bash received  : Some(82329)
+  Lines sent     : 410
+  Lines received : ~410
+  Bytes sent     : 82330
+  Bytes received : 82330
 ============================================================
-  [OK] All bytes received.
+  [OK] All 82330 chars received. Bug not reproduced.
 ```
 
-> **Note:** bash counts the 81,920 'A' characters **plus** the ~409 newlines
-> between the 200-char lines in the heredoc, so the expected value on a
-> working system is 82,329.
+> **Note:** bash counts the 81,920 'A' characters **plus** the 410 newlines
+> (one per line) in the heredoc, so the expected total is 82,330.
 
 ## Results summary
 
 | WSL version | Bytes sent | Bytes received | Result |
 |-------------|-----------|----------------|--------|
-| 2.7.10      | 81,920    | 82,329 ✓       | All bytes delivered |
-| 2.9.3       | 81,920    | 62,361 ✗       | 19,559 bytes dropped (23.9%) |
+| 2.7.10      | 82,330    | 82,330 ✓       | All bytes delivered |
+| 2.9.3       | 82,330    | 62,361 ✗       | 19,969 bytes dropped (24.3%) |
 
 The dropped bytes are **not at the tail** of the write — delivery resumes
 after the drop window, which means EOM and trailing commands still arrive.
