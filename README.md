@@ -6,27 +6,15 @@ bytes written to a ConPTY's stdin pipe are silently dropped mid-stream.
 ## Quick repro
 
 **Requirements:**
-- Windows 10/11 with WSL 2 and a Linux distro installed
+- Windows 10 1903+ or Windows 11 with WSL 2 and a Linux distro installed
 - Rust toolchain (`cargo`)
-- `conpty.dll` — **not** part of Windows itself; it is a redistributable
-  from the [Windows Terminal / ConPTY project](https://github.com/microsoft/terminal).
-  The binary searches for it automatically in these locations:
-  1. `CONPTY_DLL_PATH` env var (explicit override)
-  2. Same directory as the executable — easiest: just copy it next to the binary
-  3. `%LOCALAPPDATA%\Microsoft\WindowsApps\conpty.dll` (some installs)
-  4. `C:\Program Files\WezTerm\conpty.dll` — [WezTerm](https://wezfurlong.org/wezterm/) ships it
-
-  If none of those match, download `conpty.dll` from the
-  [Microsoft.Windows.Console.ConPTY NuGet package](https://www.nuget.org/packages/Microsoft.Windows.Console.ConPTY)
-  and copy it next to the binary.
+- No other dependencies — uses `kernel32!CreatePseudoConsole` which ships
+  with Windows
 
 ```powershell
 git clone https://github.com/warpdotdev/wsl-conpty-stdin-repro
 cd wsl-conpty-stdin-repro
 cargo build
-# If WezTerm is installed the binary finds conpty.dll automatically.
-# Otherwise copy conpty.dll next to the binary first:
-# copy path\to\conpty.dll target\debug\
 .\target\debug\wsl-stdin-repro.exe Ubuntu
 ```
 
@@ -34,7 +22,7 @@ cargo build
 
 ```
 ============================================================
-WSL ConPTY stdin truncation repro (Rust)
+WSL ConPTY stdin truncation repro
   Content : 81920 A-chars in 410 lines (82330 bytes with newlines)
   Distro  : Ubuntu
 ============================================================
@@ -42,18 +30,18 @@ WSL ConPTY stdin truncation repro (Rust)
   Spawned: wsl.exe --distribution Ubuntu -- bash --norc --noprofile  PID=2512
 Waiting 3 s for bash to start…
 Sending 82403 raw bytes via ConPTY stdin…
-Event loop done: 82403/82403 raw bytes delivered.
+Write done: 82403/82403 raw bytes delivered.
 
 Waiting up to 30 s for bash to exit…
 
 ============================================================
 RESULTS
   Lines sent     : 410
-  Lines received : ~310
+  Lines received : ~300
   Bytes sent     : 82330
-  Bytes received : 62361
-  Lines dropped  : ~100 (24.3%)
-  Bytes dropped  : 19969 (24.3%)
+  Bytes received : 60313
+  Lines dropped  : ~110 (26.7%)
+  Bytes dropped  : 22017 (26.7%)
 ============================================================
   [BUG CONFIRMED]
 ```
@@ -79,7 +67,7 @@ RESULTS
 | WSL version | Bytes sent | Bytes received | Result |
 |-------------|-----------|----------------|--------|
 | 2.7.10      | 82,330    | 82,330 ✓       | All bytes delivered |
-| 2.9.3       | 82,330    | 62,361 ✗       | 19,969 bytes dropped (24.3%) |
+| 2.9.3       | 82,330    | 60,313 ✗       | 22,017 bytes dropped (26.7%) |
 
 The dropped bytes are **not at the tail** of the write — delivery resumes
 after the drop window, which means EOM and trailing commands still arrive.
