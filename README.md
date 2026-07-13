@@ -90,20 +90,18 @@ dropped causing shell integration to never complete.
 
 ## How the repro works
 
-The repro uses the exact same ConPTY setup as Warp:
-
-1. **Bidirectional named pipe** via `NtCreateNamedPipeFile`
-   ([`pipes.rs`](https://github.com/warpdotdev/warp/blob/master/app/src/terminal/local_tty/windows/pipes.rs))
-2. **`conpty.dll`** with the same pipe handle passed as both `hInput` and
-   `hOutput`, giving the ConPTY sole ownership
-   ([`conpty_api.rs`](https://github.com/warpdotdev/warp/blob/master/app/src/terminal/local_tty/windows/conpty_api.rs))
-3. **`wsl.exe -- bash`** spawned as a ConPTY child
-   ([`windows/mod.rs`](https://github.com/warpdotdev/warp/blob/master/app/src/terminal/local_tty/windows/mod.rs))
-4. **mio async I/O loop** reading output and writing stdin concurrently
-   with proper `WouldBlock` handling
-   ([`event_loop.rs`](https://github.com/warpdotdev/warp/blob/master/app/src/terminal/local_tty/event_loop.rs))
+1. Two anonymous pipes are created: one for stdin, one for stdout
+2. `kernel32!CreatePseudoConsole` is called with the read end of the
+   stdin pipe and the write end of the stdout pipe
+3. `wsl.exe -- bash` is spawned as a ConPTY child
+4. Stdin is written and stdout is drained concurrently in separate threads
 5. bash runs `read -r -d '' VAR << 'EOM' ... EOM; echo ${#VAR} > /tmp/wsl_repro.txt`
 6. Result is read back via a plain (non-ConPTY) `wsl -- cat` invocation
+
+Note: Warp itself uses a slightly different setup
+(`conpty.dll` + a single bidirectional named pipe), but the bug reproduces
+with the standard two-pipe kernel32 API as well, which rules out Warp's
+pipe configuration as a factor.
 
 ## Related
 
