@@ -1,7 +1,6 @@
 //! WSL ConPTY stdin truncation repro
 //!
-//! Sends ~82 KB to bash's stdin via a ConPTY and checks how many bytes
-//! arrive.  Uses kernel32!CreatePseudoConsole — no external DLL required.
+//! Sends ~82 KB to bash's stdin via a ConPTY and checks how many bytes arrive.
 //!
 //! Usage: wsl-stdin-repro [DISTRO_NAME]
 
@@ -12,25 +11,25 @@ mod repro {
     use std::mem::size_of;
     use std::os::windows::ffi::OsStrExt as _;
     use std::process::Command;
-    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
-
-    /// HANDLE is a raw pointer and not Send by default; this wrapper
-    /// asserts it is safe to transfer across threads for our use case
-    /// (each handle is owned by exactly one thread at a time).
-    struct SendHandle(HANDLE);
-    unsafe impl Send for SendHandle {}
     use windows::Win32::Security::SECURITY_ATTRIBUTES;
     use windows::Win32::System::Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON};
     use windows::Win32::System::Threading::{
         CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
         EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList,
         LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION,
-        STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute, WaitForSingleObject,
+        STARTUPINFOEXW, STARTUPINFOW, TerminateProcess, UpdateProcThreadAttribute,
+        WaitForSingleObject,
     };
     use windows::core::PCWSTR;
+
+    /// HANDLE is a raw pointer and not Send by default; this wrapper
+    /// asserts it is safe to transfer across threads for our use case
+    /// (each handle is owned by exactly one thread at a time).
+    struct SendHandle(HANDLE);
+    unsafe impl Send for SendHandle {}
 
     unsafe fn make_pipe() -> windows::core::Result<(HANDLE, HANDLE)> {
         let sa = SECURITY_ATTRIBUTES {
@@ -230,29 +229,19 @@ mod repro {
             let stdout_sh = SendHandle(stdout_read);
             let stdout_thread = std::thread::spawn(move || drain_blocking(stdout_sh));
 
+            let hd_len = hd.len();
             let stdin_sh = SendHandle(stdin_write);
-            let hd_owned = hd.clone();
-            let hd_arc = Arc::new(hd);
-            let write_result = Arc::new(Mutex::new(0usize));
-            let wr_clone = Arc::clone(&write_result);
-            let stdin_thread = std::thread::spawn(move || {
-                let n = write_all_blocking(stdin_sh, hd_owned);
-                *wr_clone.lock().unwrap() = n;
-            });
-
-            stdin_thread.join().ok();
-            let written = *write_result.lock().unwrap();
-            println!(
-                "Write done: {}/{} raw bytes delivered.\n",
-                written,
-                hd_arc.len()
-            );
+            let stdin_thread = std::thread::spawn(move || write_all_blocking(stdin_sh, hd));
+            let written = stdin_thread.join().unwrap_or(0);
+            println!("Write done: {}/{} raw bytes delivered.\n", written, hd_len);
 
             // 6. Wait for bash to exit
             println!("Waiting up to 5 s for bash to exit…");
             let w = WaitForSingleObject(pi.hProcess, 5_000);
             let timed_out = w.0 == 0x00000102;
-            if timed_out { let _ = windows::Win32::System::Threading::TerminateProcess(pi.hProcess, 1); }
+            if timed_out {
+                let _ = TerminateProcess(pi.hProcess, 1);
+            }
             let _ = CloseHandle(pi.hProcess);
             ClosePseudoConsole(pty);
             let _ = CloseHandle(stdout_read);
