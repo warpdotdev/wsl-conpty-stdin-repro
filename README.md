@@ -6,6 +6,7 @@ bytes written to a ConPTY's stdin pipe are silently dropped mid-stream.
 ## Quick repro
 
 **Requirements:**
+
 - Windows 10 1903+ or Windows 11 with WSL 2 and a Linux distro installed
 - Rust toolchain (`cargo`)
 - No other dependencies — uses `kernel32!CreatePseudoConsole` which ships
@@ -27,21 +28,18 @@ WSL ConPTY stdin truncation repro
   Distro  : Ubuntu
 ============================================================
 
-  Spawned: wsl.exe --distribution Ubuntu -- bash --norc --noprofile  PID=2512
-Waiting 3 s for bash to start…
+  Spawned: wsl.exe --distribution Ubuntu -- bash --norc --noprofile  PID=94928
+Waiting 5s for bash to start…
 Sending 82403 raw bytes via ConPTY stdin…
 Write done: 82403/82403 raw bytes delivered.
 
-Waiting up to 30 s for bash to exit…
+Waiting up to 5 s for bash to exit…
 
 ============================================================
 RESULTS
-  Lines sent     : 410
-  Lines received : ~300
-  Bytes sent     : 82330
-  Bytes received : 60313
-  Lines dropped  : ~110 (26.7%)
-  Bytes dropped  : 22017 (26.7%)
+  Bytes sent     : 82329
+  Bytes received : 62361
+  Bytes dropped  : 19968 (24.3%)
 ============================================================
   [BUG CONFIRMED]
 ```
@@ -51,12 +49,10 @@ RESULTS
 ```
 ============================================================
 RESULTS
-  Lines sent     : 410
-  Lines received : ~410
-  Bytes sent     : 82330
-  Bytes received : 82330
+  Bytes sent     : 82329
+  Bytes received : 82329
 ============================================================
-  [OK] All 82330 chars received. Bug not reproduced.
+  [OK] All bytes received. Bug not reproduced.
 ```
 
 > **Note:** bash counts the 81,920 'A' characters **plus** the 410 newlines
@@ -64,10 +60,10 @@ RESULTS
 
 ## Results summary
 
-| WSL version | Bytes sent | Bytes received | Result |
-|-------------|-----------|----------------|--------|
-| 2.7.10      | 82,330    | 82,330 ✓       | All bytes delivered |
-| 2.9.3       | 82,330    | 60,313 ✗       | 22,017 bytes dropped (26.7%) |
+| WSL version | Bytes sent | Bytes received | Result                       |
+| ----------- | ---------- | -------------- | ---------------------------- |
+| 2.7.10      | 82,330     | 82,330 ✓       | All bytes delivered          |
+| 2.9.3       | 82,330     | 60,313 ✗       | 22,017 bytes dropped (26.7%) |
 
 The dropped bytes are **not at the tail** of the write — delivery resumes
 after the drop window, which means EOM and trailing commands still arrive.
@@ -105,5 +101,5 @@ pipe configuration as a factor.
 
 ## Related
 
-- WSL issue: [microsoft/WSL#XXXXX](https://github.com/microsoft/WSL/issues)
-- Warp: https://www.warp.dev
+- WSL issue: https://github.com/microsoft/WSL/issues/41080
+- Warp issue: https://github.com/warpdotdev/warp/issues/13308
